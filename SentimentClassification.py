@@ -296,7 +296,7 @@ bert_model = BertModel.from_pretrained(model_name)
 max_length = 512
 
 # Set the batch size to be used during the training process.
-batch_size = 100
+batch_size = 10
 
 # Create the ground truth dataset instance of the SentimentDataset class.
 ground_truth_dataset = SentimentDataset(texts,labels,tokenizer,max_length)
@@ -337,11 +337,11 @@ model = model.to(device)
 #                          MAIN TRAINING PROCESS:
 # -----------------------------------------------------------------------------
 
-# Report the training options.
-print(f"Training Epochs:{epochs} Batch Size:{batch_size}")
-
 # Set the number of training epochs.
 epochs = 20
+
+# Report the training options.
+print(f"Training Epochs:{epochs} Batch Size:{batch_size}")
 
 for epoch in range(epochs):
     model.train()
