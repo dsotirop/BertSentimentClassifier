@@ -337,6 +337,9 @@ model = model.to(device)
 #                          MAIN TRAINING PROCESS:
 # -----------------------------------------------------------------------------
 
+# Report the training options.
+print(f"Training Epochs:{epochs} Batch Size:{batch_size}")
+
 # Set the number of training epochs.
 epochs = 20
 
