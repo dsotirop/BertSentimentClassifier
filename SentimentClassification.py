@@ -296,7 +296,7 @@ bert_model = BertModel.from_pretrained(model_name)
 max_length = 512
 
 # Set the batch size to be used during the training process.
-batch_size = 10
+batch_size = 2
 
 # Create the ground truth dataset instance of the SentimentDataset class.
 ground_truth_dataset = SentimentDataset(texts,labels,tokenizer,max_length)
@@ -334,29 +334,55 @@ model = model.to(device)
 # their parallel processing capabilities.
 
 # -----------------------------------------------------------------------------
-#                          MAIN TRAINING PROCESS:
+#                          MODEL EVALUATION PROCESS:
+# -----------------------------------------------------------------------------
+
+def evaluate_model(model,data_loader,device,return_probabilities=False):
+    # Set the model evaluation environment.
+    model.eval()
+    # Initialize variables counting the total and correctly classified text
+    # instances.
+    total,correct = 0,0
+    # Initialize the list containing the output probabilities for each text
+    # instance.
+    all_probabilities = []
+    
+    # Indicate that no gradient-based updating of the model weight-vector will
+    # be performed during this process.
+    with torch.no_grad():
+        for batch in data_loader:
+            # Acquire the information that the bert tokenizer associated with
+            # each textual input.
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["label"].to(device)
+            # Acquire the network output for each instance in the batch.
+            outputs = model(input_ids=input_ids,attention_mask=attention_mask)
+            # Convert the network primitive output to probabilities.
+            probabilities = torch.nn.functional.softmax(outputs,dim=1)
+            # Get the predicted class index by determining which component of
+            # the probability vector contains the maximum value.
+            _,predicted = torch.max(probabilities,1)
+            # If the corresponding input argument indicates that probability
+            # vectors should also be returned, then perform the necessary 
+            # computation.
+            if return_probabilities:
+                all_probabilities.extend(probabilities.cpu().numpy())
+            # Accumulate the total number of text instances that have been 
+            # classified so far.
+            total += labels.size(0)
+            # Accumulate the total number of text instances that have been 
+            # correctly classified.
+            correct += (predicted==labels).sum().item()
+    
+    # Compute the total accuracy of the model on the subset of text instances
+    # stored in the data loader.
+    accuracy = correct / total
+    
+    return (accuracy,np.array(all_probabilities)) if return_probabilities else accuracy 
+
+# -----------------------------------------------------------------------------
+#                          MODEL TRAINING PROCESS:
 # -----------------------------------------------------------------------------
 
 # Set the number of training epochs.
-epochs = 20
-
-# Report the training options.
-print(f"Training Epochs:{epochs} Batch Size:{batch_size}")
-
-for epoch in range(epochs):
-    model.train()
-    for batch in tqdm(train_loader):
-        
-        # Collect the bert tokenizer output for each sequence in the batch.
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["label"].to(device)
-        
-        # Forward Pass:
-        outputs = model(input_ids=input_ids,attention_mask=attention_mask)
-        loss = loss_fn(outputs,labels)
-        
-        # Backward Pass and Optimization:
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
