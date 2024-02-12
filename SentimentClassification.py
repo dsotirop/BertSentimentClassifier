@@ -11,6 +11,8 @@ import openpyxl
 import pandas as pd
 import numpy as np
 import re
+import os
+from collections import defaultdict
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -186,6 +188,51 @@ class SentimentDataset(Dataset):
         return item
 # -----------------------------------------------------------------------------
 
+# Define an additional function that will preserve a given percentage of data
+# instances per class in order to reduce the overall size of the dataset in 
+# order to reduce the computation time required to process it.This function 
+# will return the data indices to be retained keeping an equal amount of 
+# patterns from each distinct class.
+def balanced_dataset_reduction(dataset,percentage):
+    # Initialize a dictionary object that will be used for grouping the data
+    # points indices per class.
+    indices_by_class = defaultdict(list)
+    
+    # defaultdict: is a class provided by the collections module in Python. 
+    # It works like a regular dictionary but with one key difference: it 
+    # automatically creates new items for keys that have not been encountered 
+    # yet. When you try to access a key that doesn't exist, instead of raising a
+    # a KeyError, defaultdict creates the key and initializes it to a default 
+    # value that you specify.
+    
+    # list: in this case is the default value type specified for the 
+    # defaultdict. It means that when a new key is accessed in indices_by_class
+    # that doesn't exist yet, a new empty list will be created as its value.
+    
+    # So, indices_by_class = defaultdict(list) creates a defaultdict where the 
+    # default value type for new keys is an empty list. This is useful for 
+    # collecting indices corresponding to different class labels in a dataset, 
+    # as you can simply append indices to the list associated with each class 
+    # label without having to check if the key exists first.
+    
+    # Loop through the various datapoints stored in the dataset object by 
+    # keeping both the actual data and the corresponding indices.
+    for idx,data in enumerate(dataset):
+        # Acquire the class label for the currently processed data instance.
+        label = data["label"].item()
+        indices_by_class[label].append(idx)
+        
+    # Shuffle and select indices from each class.
+    # Initialize the list container that will store the data indices that will
+    # be retained.
+    filtered_indices = []
+    # Loop through the value entries for each key in the dictionary.
+    for indices in indices_by_class.values():
+        np.random.shuffle(indices)
+        # Compute the number of indices to be kept.
+        retain_number = int(len(indices)*percentage)
+        filtered_indices.extend(indices[:retain_number])
+    return filtered_indices
 # -----------------------------------------------------------------------------
 # Define the Sentiment Classifier Class. 
 # -----------------------------------------------------------------------------
@@ -301,6 +348,16 @@ batch_size = 2
 # Create the ground truth dataset instance of the SentimentDataset class.
 ground_truth_dataset = SentimentDataset(texts,labels,tokenizer,max_length)
 
+# Set the percentage of data to be kept from each distinct class.
+retain_percent = 0.50
+
+# Filter the ground truth dataset per class according to the prespecified 
+# percentage value per class.
+filtered_indices = balanced_dataset_reduction(ground_truth_dataset,retain_percent)
+
+# Generate the reduced version of the complete dataset.
+reduced_ground_truth_dataset = torch.utils.data.Subset(ground_truth_dataset,filtered_indices)
+
 # Create the dataset instance for the unseen set of tweets.
 unseen_dataset = SentimentDataset(excel_texts,[],tokenizer,max_length)
 
@@ -308,30 +365,17 @@ unseen_dataset = SentimentDataset(excel_texts,[],tokenizer,max_length)
 train_percent = 0.8
 
 # Set the train and the test sizes.
-train_size = int(train_percent * len(ground_truth_dataset))
-test_size = len(ground_truth_dataset) - train_size
+train_size = int(train_percent * len(reduced_ground_truth_dataset))
+test_size = len(reduced_ground_truth_dataset) - train_size
 
 # Split the ground truth dataset into training and testing subsets.
-train_dataset, test_dataset = random_split(ground_truth_dataset, [train_size,test_size])
+train_dataset, test_dataset = random_split(
+    reduced_ground_truth_dataset, [train_size,test_size])
 
 # Instantiate the training and testing data loaders.
 train_loader = DataLoader(train_dataset,batch_size=batch_size,shuffle=True)
 test_loader = DataLoader(test_dataset,batch_size=batch_size)
 
-# -----------------------------------------------------------------------------
-#           CLASSIFIER, LOSS FUNCTION AND OPTIMIZER INITIALIZATION:
-# -----------------------------------------------------------------------------
-model = SentimentClassifier(bert_model,classes_num)
-optimizer = torch.optim.Adam(model.parameters(),lr=2e-5)
-loss_fn = nn.CrossEntropyLoss()
-# Set the device on which training will be performed.
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-# Method .to(device) is a PyTorch method used to move tensors or models to a 
-# specified device. The device argument specifies where the tensors or model 
-# should be moved. It could be either a CPU or a GPU. In the context of deep 
-# learning, moving models to GPUs can significantly speed up computation due to 
-# their parallel processing capabilities.
 
 # -----------------------------------------------------------------------------
 #                          MODEL EVALUATION PROCESS:
@@ -350,7 +394,7 @@ def evaluate_model(model,data_loader,device,return_probabilities=False):
     # Indicate that no gradient-based updating of the model weight-vector will
     # be performed during this process.
     with torch.no_grad():
-        for batch in data_loader:
+        for batch in tqdm(data_loader):
             # Acquire the information that the bert tokenizer associated with
             # each textual input.
             input_ids = batch["input_ids"].to(device)
@@ -385,4 +429,125 @@ def evaluate_model(model,data_loader,device,return_probabilities=False):
 #                          MODEL TRAINING PROCESS:
 # -----------------------------------------------------------------------------
 
+def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
+                checkpoint_path=None,save_every_batches=None):
+    
+    # Load the state variables from the last training session.
+    checkpoint = torch.load(checkpoint_path)
+    # Load the last state of the neural model.
+    model.load_state_dict(checkpoint["model_state_dict"])
+    # Load the last state of the optimizer.
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    # Set the starting epoch of the training process to be the last 
+    # training epoch of the previous session.
+    start_epoch = checkpoint["epoch"]
+    # Load the last batch processed during the previous training session.
+    batch_count = checkpoint["batch_count"]
+    # Load the best accuracy achieved by the model so far.
+    best_accuracy = checkpoint["best_accuracy"]
+    
+    # Actual Model Training Process
+    
+    # Loop through the remaining training epochs.
+    for epoch in range(start_epoch,epochs):
+        # Set the model training environment.
+        model.train()
+        # Loop through the various batches.
+        for batch_idx,batch in enumerate(tqdm(train_loader,desc=f"Epoch: {epoch+1} / {epochs}")):
+            # Skip batches until the last processed batch is reached.
+            if batch_idx < batch_count:
+                continue
+            # Load the necessary information from the current batch.
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["label"].to(device)
+            # Compute the output of the model and the associated loss by 
+            # performing the forward pass of information.
+            outputs = model(input_ids=input_ids,attention_mask=attention_mask)
+            loss = loss_fn(outputs,labels)
+            # Optimize model parameters by performing the backward pass of 
+            # information.
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            # Increase the number of batches processed so far.
+            batch_count += 1
+            # Save checkpoint if specified and if the currently processed batch
+            # is an integer multiple of the save_every_batches input arguments.
+            # Thus, a training checkpoint will be saved after every given amount
+            # of batches has been processed.
+            if save_every_batches is not None and batch_count % save_every_batches==0:
+                torch.save({
+                    'epoch':epoch,
+                    'batch_count':batch_count,
+                    'model_state_dict':model.state_dict(),
+                    'optimizer_state_dict':optimizer.state_dict(),
+                    'best_accuracy':best_accuracy
+                    },checkpoint_path)
+    
+    # Evaluate the model on the test set after each epoch.
+    accuracy = evaluate_model(model,test_loader,device)
+    
+    # Save final checkpoint after each training epoch has been completed.
+    torch.save({
+        'epoch':epoch,
+        'batch_count':batch_count,
+        'model_state_dict':model.state_dict(),
+        'optimizer_state_dict':optimizer.state_dict(),
+        'best_accuracy':accuracy
+        },checkpoint_path)
+    
+    # Report the termination of the training process.
+    print("Training process completed")
+
+# -----------------------------------------------------------------------------
+#    CLASSIFIER, LOSS FUNCTION, OPTIMIZER AND CHECK POINT INITIALIZATION:
+# -----------------------------------------------------------------------------
+model = SentimentClassifier(bert_model,classes_num)
+optimizer = torch.optim.Adam(model.parameters(),lr=2e-5)
+loss_fn = nn.CrossEntropyLoss()
 # Set the number of training epochs.
+epochs = 20
+# Set the device on which training will be performed.
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+
+# Method .to(device) is a PyTorch method used to move tensors or models to a 
+# specified device. The device argument specifies where the tensors or model 
+# should be moved. It could be either a CPU or a GPU. In the context of deep 
+# learning, moving models to GPUs can significantly speed up computation due to 
+# their parallel processing capabilities.
+
+# Define the name of the checkpoint directory
+checkpoint_directory = "checkpoints"
+# Define the name of the file that will actually store the checkpoint dictionary.
+checkpoint_filename = "model_checkpoint.pth"
+# Create the full path for the checkpoint directory within the current directory
+checkpoint_path = os.path.join(checkpoint_directory,checkpoint_filename)
+# Set the number of batches within each training epoch after which a checkpoint
+# entry will be saved.
+batches_save_period = 5
+# Create the checkpoint directory and the corresponding file in case it does 
+# not exist. In that case, create the file and save the initial state of the
+# training process.
+if not os.path.exists(checkpoint_directory):
+    os.makedirs(checkpoint_directory)
+    f = open(checkpoint_path,"w")
+    f.close()
+    # Set the initial state variables of the training process.
+    epoch = 0
+    batch_count=0
+    model_state_dict = model.state_dict()
+    optimizer_state_dict = optimizer.state_dict()
+    best_accuracy = 0
+    torch.save({
+        'epoch':epoch,
+        'batch_count':batch_count,
+        'model_state_dict':model.state_dict(),
+        'optimizer_state_dict':optimizer.state_dict(),
+        'best_accuracy':best_accuracy
+        },checkpoint_path)
+
+# Call the model training method.
+train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
+            checkpoint_path=checkpoint_path,save_every_batches=batches_save_period)
