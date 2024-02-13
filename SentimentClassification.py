@@ -349,7 +349,7 @@ batch_size = 2
 ground_truth_dataset = SentimentDataset(texts,labels,tokenizer,max_length)
 
 # Set the percentage of data to be kept from each distinct class.
-retain_percent = 0.50
+retain_percent = 0.10
 
 # Filter the ground truth dataset per class according to the prespecified 
 # percentage value per class.
@@ -507,7 +507,7 @@ model = SentimentClassifier(bert_model,classes_num)
 optimizer = torch.optim.Adam(model.parameters(),lr=2e-5)
 loss_fn = nn.CrossEntropyLoss()
 # Set the number of training epochs.
-epochs = 20
+epochs = 10
 # Set the device on which training will be performed.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
