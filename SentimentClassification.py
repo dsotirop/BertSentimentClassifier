@@ -18,6 +18,21 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from transformers import BertTokenizer, BertModel
+import matplotlib.pyplot as plt
+import sys
+# -----------------------------------------------------------------------------
+#                          COMMAND LINE ARGUMENTS:
+# -----------------------------------------------------------------------------
+# Get the number of command line arguments given.
+n_args = len(sys.argv)
+# Command Line Argument 1: set the percentage of data to be kept from each 
+#                          distinct class.
+if n_args > 1:
+    retain_percent = float(sys.argv[1])
+    print(f'retain_percent:{retain_percent}')
+else:
+    retain_percent = 0.01
+
 
 # -----------------------------------------------------------------------------
 #                          FUNCTION DEFINITIONS:
@@ -46,6 +61,21 @@ def clean_text(text):
     # Lowercase the words
     text = text.lower()
     return text
+# -----------------------------------------------------------------------------
+# This method will be used to plot the absolute frequency histogram for the
+# sequence lengths.
+def plot_histogram(data,bin_centers,xlabel,ylabel,title):
+    # Calculate the bin edges by shifting the bin centers.
+    bin_edges = np.array(bin_centers)-0.5
+    # Append the edge point for the last bin.
+    bin_edges = np.append(bin_edges,bin_centers[-1]+0.5)
+    plt.hist(data,bins=bin_edges)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True)
+    plt.show()
+
 # -----------------------------------------------------------------------------
 # This method provides fundamental parsing functionality for a given excel 
 # file. The output returned is a list of strings where each string contains 
@@ -228,6 +258,8 @@ def balanced_dataset_reduction(dataset,percentage):
     filtered_indices = []
     # Loop through the value entries for each key in the dictionary.
     for indices in indices_by_class.values():
+        # Convert indices to numpy array to increase execution speed.
+        indices = np.array(indices)
         np.random.shuffle(indices)
         # Compute the number of indices to be kept.
         retain_number = int(len(indices)*percentage)
@@ -243,6 +275,9 @@ class SentimentClassifier(nn.Module):
         # Call the super class constructor.
         super(SentimentClassifier,self).__init__()
         self.bert = bert_model
+        # Freeze the parameters of the BERT model.
+        for param in self.bert.parameters():
+            param.requires_grad = False
         self.drop = nn.Dropout(p=dropout_percent)
         self.out = nn.Linear(self.bert.config.hidden_size,n_classes)
         
@@ -296,6 +331,23 @@ df.drop(dropped_columns,axis="columns",inplace=True)
 # Isolate the list of string texts.
 texts = list(df["text"])
 
+# Compute the sequence length distribution for the cleaned texts.
+cleaned_texts = [clean_text(text) for text in texts]
+# Generate the list of lengh per sequence.
+L = [len(clean_text) for clean_text in cleaned_texts]
+# Convert the list to numpy array.
+NL = np.array(L)
+# Compute the minimum and maximum sequence length.
+Lmin,Lmax = NL.min(),NL.max()
+# Compute the mean and the standard deviation of the sequence lengths.
+Lmean,Lstd = NL.mean(),NL.std()
+# Set the bin centers.
+bin_centers = [l for l in range(Lmin,Lmax+1)]
+# Plot the histogram.
+plot_histogram(L,bin_centers,"Sequence Length","Absolute Frequency",
+               "Sequence Length Distribution")
+
+
 # Isolate the dataframe of labels and covert it to a numpy array.
 labels = df.iloc[:,1:].to_numpy()
 # Convert the one-hot vector encoded labels into a list of integer ids 
@@ -303,6 +355,25 @@ labels = df.iloc[:,1:].to_numpy()
 labels = list(np.argmax(labels,axis=1))
 # Get the number of classes existing within the ground truth dataset.
 classes_num = len(set(labels))
+# Get the names of the various classes.
+ClassNames = list(df)[1:] # The first entry is omitted since it is the text.
+# Compute the distribution distribution of data instances per label.
+Labels = np.array(labels)
+Labels_min = Labels.min()
+Labels_max = Labels.max()
+Labels_bins = np.arange(Labels_min,Labels_max+2)
+LabelsHist,_ = np.histogram(Labels,Labels_bins)
+# Set the bin centers for the labels.
+Labels_centers = [lc for lc in range(Labels_min,Labels_max+1)]
+# Plot the histogram.
+plot_histogram(Labels,Labels_centers,"Sentiment","Absolute Frequency",
+               "Sentiment Class Distribution")
+# Create a dictionary storing the frequency of occurence for each distinct
+# sentiment class.
+ClassNamesHist = dict(zip(ClassNames,LabelsHist))
+
+# Compute the class priors.
+class_priors = LabelsHist / LabelsHist.sum()
 
 # Set the location of the dataset that will be exclusively used for testing
 # purposes and for which no ground truth labels are available.
@@ -339,8 +410,9 @@ bert_model = BertModel.from_pretrained(model_name)
 #                           DATA PREPARATION:
 # -----------------------------------------------------------------------------
 
-# Set the maximum length for the input sequences.
-max_length = 512
+# Set the maximum length for the input sequences to be 3 standard deviations
+# away from the average sequence length.
+max_length = int(Lmean+3*Lstd)+1
 
 # Set the batch size to be used during the training process.
 batch_size = 2
@@ -348,15 +420,13 @@ batch_size = 2
 # Create the ground truth dataset instance of the SentimentDataset class.
 ground_truth_dataset = SentimentDataset(texts,labels,tokenizer,max_length)
 
-# Set the percentage of data to be kept from each distinct class.
-retain_percent = 0.10
 
 # Filter the ground truth dataset per class according to the prespecified 
-# percentage value per class.
-filtered_indices = balanced_dataset_reduction(ground_truth_dataset,retain_percent)
-
-# Generate the reduced version of the complete dataset.
-reduced_ground_truth_dataset = torch.utils.data.Subset(ground_truth_dataset,filtered_indices)
+# percentage value per class if the respective percentage is not set to None.
+# In case it is not None, generate the reduced version of the complete dataset. 
+if retain_percent is not None:
+    filtered_indices = balanced_dataset_reduction(ground_truth_dataset,retain_percent)
+    ground_truth_dataset = torch.utils.data.Subset(ground_truth_dataset,filtered_indices)
 
 # Create the dataset instance for the unseen set of tweets.
 unseen_dataset = SentimentDataset(excel_texts,[],tokenizer,max_length)
@@ -365,12 +435,12 @@ unseen_dataset = SentimentDataset(excel_texts,[],tokenizer,max_length)
 train_percent = 0.8
 
 # Set the train and the test sizes.
-train_size = int(train_percent * len(reduced_ground_truth_dataset))
-test_size = len(reduced_ground_truth_dataset) - train_size
+train_size = int(train_percent * len(ground_truth_dataset))
+test_size = len(ground_truth_dataset) - train_size
 
 # Split the ground truth dataset into training and testing subsets.
 train_dataset, test_dataset = random_split(
-    reduced_ground_truth_dataset, [train_size,test_size])
+    ground_truth_dataset, [train_size,test_size])
 
 # Instantiate the training and testing data loaders.
 train_loader = DataLoader(train_dataset,batch_size=batch_size,shuffle=True)
@@ -443,8 +513,10 @@ def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
     start_epoch = checkpoint["epoch"]
     # Load the last batch processed during the previous training session.
     batch_count = checkpoint["batch_count"]
-    # Load the best accuracy achieved by the model so far.
-    best_accuracy = checkpoint["best_accuracy"]
+    # Load the train accuracy achieved by the model so far.
+    train_accuracy = checkpoint['train_accuracy']
+    # Load the test accuracy achieved by the model so far.
+    test_accuracy = checkpoint["test_accuracy"]
     
     # Actual Model Training Process
     
@@ -453,10 +525,13 @@ def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
         # Set the model training environment.
         model.train()
         # Loop through the various batches.
-        for batch_idx,batch in enumerate(tqdm(train_loader,desc=f"Epoch: {epoch+1} / {epochs}")):
+        for batch_idx,batch in enumerate(tqdm(train_loader,
+                                              desc=f"Epoch: {epoch+1} / {epochs} train_acc: {train_accuracy} test_acc: {test_accuracy}")):
             # Skip batches until the last processed batch is reached.
             if batch_idx < batch_count:
                 continue
+            # Clear gradients.
+            optimizer.zero_grad()
             # Load the necessary information from the current batch.
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -467,7 +542,6 @@ def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
             loss = loss_fn(outputs,labels)
             # Optimize model parameters by performing the backward pass of 
             # information.
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             # Increase the number of batches processed so far.
@@ -482,19 +556,26 @@ def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
                     'batch_count':batch_count,
                     'model_state_dict':model.state_dict(),
                     'optimizer_state_dict':optimizer.state_dict(),
-                    'best_accuracy':best_accuracy
+                    'train_accuracy':train_accuracy,
+                    'test_accuracy':test_accuracy
                     },checkpoint_path)
-    
-    # Evaluate the model on the test set after each epoch.
-    accuracy = evaluate_model(model,test_loader,device)
-    
-    # Save final checkpoint after each training epoch has been completed.
-    torch.save({
-        'epoch':epoch,
-        'batch_count':batch_count,
-        'model_state_dict':model.state_dict(),
-        'optimizer_state_dict':optimizer.state_dict(),
-        'best_accuracy':accuracy
+        
+        # After the termimation of each training epoch the batch_count variable
+        # must be reset to zero so that the next training epoch does not skip
+        # all the batches that have been completed by the previous session.
+        batch_count = 0
+        # Evaluate the train accuracy of the model after each epoch.
+        train_accuracy = evaluate_model(model,train_loader,device)
+        # Evaluate the model on the test set after each epoch.
+        test_accuracy = evaluate_model(model,test_loader,device)
+        # Save final checkpoint after each training epoch has been completed.
+        torch.save({
+            'epoch':epoch,
+            'batch_count':batch_count,
+            'model_state_dict':model.state_dict(),
+            'optimizer_state_dict':optimizer.state_dict(),
+            'train_accuracy':train_accuracy,
+            'test_accuracy':test_accuracy
         },checkpoint_path)
     
     # Report the termination of the training process.
@@ -503,14 +584,18 @@ def train_model(model,train_loader,test_loader,optimizer,loss_fn,epochs,
 # -----------------------------------------------------------------------------
 #    CLASSIFIER, LOSS FUNCTION, OPTIMIZER AND CHECK POINT INITIALIZATION:
 # -----------------------------------------------------------------------------
-model = SentimentClassifier(bert_model,classes_num)
-optimizer = torch.optim.Adam(model.parameters(),lr=2e-5)
-loss_fn = nn.CrossEntropyLoss()
-# Set the number of training epochs.
-epochs = 10
 # Set the device on which training will be performed.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
+model = SentimentClassifier(bert_model,classes_num)
+optimizer = torch.optim.Adam(model.parameters(),lr=2e-5)
+# Set the class weights to be inversly proportinal to the class priors.
+class_weights = 1 / class_priors
+# Convert class weights to tensor
+weight = torch.tensor(class_weights, dtype=torch.float).to(device)
+loss_fn = nn.CrossEntropyLoss(weight=weight)
+# Set the number of training epochs.
+epochs = 10
+model = model.to(device) 
 
 # Method .to(device) is a PyTorch method used to move tensors or models to a 
 # specified device. The device argument specifies where the tensors or model 
@@ -539,13 +624,15 @@ if not os.path.exists(checkpoint_directory):
     batch_count=0
     model_state_dict = model.state_dict()
     optimizer_state_dict = optimizer.state_dict()
-    best_accuracy = 0
+    train_accuracy = 0
+    test_accuracy = 0
     torch.save({
         'epoch':epoch,
         'batch_count':batch_count,
         'model_state_dict':model.state_dict(),
         'optimizer_state_dict':optimizer.state_dict(),
-        'best_accuracy':best_accuracy
+        'train_accuracy':train_accuracy,
+        'test_accuracy':test_accuracy
         },checkpoint_path)
 
 # Call the model training method.
